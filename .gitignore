@@ -1,0 +1,25 @@
+# Environment files — never commit these
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS
+.DS_Store
+
+# Local tooling artifacts
+.playwright-cli/
