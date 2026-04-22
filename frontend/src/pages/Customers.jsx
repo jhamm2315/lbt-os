@@ -8,6 +8,14 @@ import { format } from 'date-fns'
 const TAGS = ['loyal', 'vip', 'at_risk', 'inactive', 'new']
 const EMPTY_FORM = { name: '', email: '', phone: '', address: '', tags: [], notes: '' }
 
+const TAG_COLORS = {
+  loyal:    'bg-emerald-50 text-emerald-700',
+  vip:      'bg-violet-50 text-violet-700',
+  at_risk:  'bg-red-50 text-red-700',
+  inactive: 'bg-slate-100 text-slate-500',
+  new:      'bg-blue-50 text-blue-700',
+}
+
 export default function Customers() {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -32,40 +40,54 @@ export default function Customers() {
     setForm((f) => ({ ...f, tags: f.tags.includes(t) ? f.tags.filter((x) => x !== t) : [...f.tags, t] }))
   }
 
+  const totalLTV  = customers.reduce((s, c) => s + (c.lifetime_value || 0), 0)
+  const repeatPct = customers.length
+    ? ((customers.filter((c) => c.total_orders > 1).length / customers.length) * 100).toFixed(0)
+    : 0
+
   const columns = [
-    { key: 'name',            label: 'Name',          render: (v) => <span className="font-medium">{v}</span> },
-    { key: 'phone',           label: 'Phone' },
-    { key: 'total_orders',    label: 'Orders' },
-    { key: 'lifetime_value',  label: 'LTV',           render: (v) => `$${Number(v).toLocaleString()}` },
-    { key: 'last_purchase_at',label: 'Last Purchase',  render: (v) => v ? format(new Date(v), 'MMM d, yyyy') : '—' },
-    { key: 'tags',            label: 'Tags',          render: (v) => (v || []).map((t) => (
-      <span key={t} className="badge bg-gray-100 text-gray-600 mr-1">{t}</span>
+    { key: 'name',             label: 'Name',          render: (v) => <span className="font-medium">{v}</span> },
+    { key: 'phone',            label: 'Phone' },
+    { key: 'total_orders',     label: 'Orders' },
+    { key: 'lifetime_value',   label: 'LTV',           render: (v) => `$${Number(v).toLocaleString()}` },
+    { key: 'last_purchase_at', label: 'Last Purchase',  render: (v) => v ? format(new Date(v), 'MMM d, yyyy') : '—' },
+    { key: 'tags',             label: 'Tags',           render: (v) => (v || []).map((t) => (
+      <span key={t} className={`badge mr-1 ${TAG_COLORS[t] || 'bg-slate-100 text-slate-500'}`}>{t}</span>
     ))},
   ]
 
-  const totalLTV = customers.reduce((s, c) => s + (c.lifetime_value || 0), 0)
-  const repeatPct = customers.length ? (customers.filter((c) => c.total_orders > 1).length / customers.length * 100).toFixed(0) : 0
-
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Customers</h1>
+    <div className="page-shell">
+      <section className="page-command">
+        <div>
+          <div className="section-kicker">Relationships</div>
+          <h1 className="page-title">Customers</h1>
+          <p className="page-copy">Keep customer value, repeat behavior, and account notes easy to scan.</p>
+        </div>
         <button className="btn-primary" onClick={openNew}>+ Add Customer</button>
-      </div>
+      </section>
 
-      <div className="grid grid-cols-3 gap-4">
-        <div className="card p-4">
-          <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Total Customers</div>
-          <div className="text-xl font-bold">{customers.length}</div>
+      <section className="metric-strip md:grid-cols-3">
+        <div className="metric-chip">
+          <div className="metric-label">Customers</div>
+          <div className="metric-value">{customers.length}</div>
+          <p className="mt-2 text-xs text-slate-400">all time</p>
         </div>
-        <div className="card p-4">
-          <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Total LTV</div>
-          <div className="text-xl font-bold">${totalLTV.toLocaleString()}</div>
+        <div className="metric-chip">
+          <div className="metric-label">Total LTV</div>
+          <div className="metric-value">${totalLTV.toLocaleString()}</div>
+          <p className="mt-2 text-xs text-slate-400">lifetime revenue</p>
         </div>
-        <div className="card p-4">
-          <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Repeat Rate</div>
-          <div className="text-xl font-bold">{repeatPct}%</div>
+        <div className="metric-chip">
+          <div className="metric-label">Repeat Rate</div>
+          <div className="metric-value">{repeatPct}%</div>
+          <p className="mt-2 text-xs text-slate-400">2+ orders</p>
         </div>
+      </section>
+
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-semibold tracking-tight text-slate-950">Customer directory</h2>
+        <span className="text-sm text-slate-400">{customers.length} total</span>
       </div>
 
       <DataTable columns={columns} data={customers} onRowClick={openEdit} emptyMessage="No customers yet. Convert a lead or add one manually." />
@@ -96,7 +118,7 @@ export default function Customers() {
               {TAGS.map((t) => (
                 <button
                   key={t} type="button"
-                  className={`badge text-sm cursor-pointer border transition-colors ${form.tags.includes(t) ? 'bg-brand-500 text-white border-brand-500' : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-brand-300'}`}
+                  className={`badge text-sm cursor-pointer border transition-colors ${form.tags.includes(t) ? 'bg-brand-500 text-white border-brand-500' : 'bg-slate-50 text-slate-600 border-slate-200 hover:border-brand-300'}`}
                   onClick={() => toggleTag(t)}
                 >{t}</button>
               ))}
@@ -109,7 +131,7 @@ export default function Customers() {
           <div className="flex gap-3 justify-end pt-2">
             <button type="button" className="btn-secondary" onClick={closeModal}>Cancel</button>
             <button type="submit" className="btn-primary" disabled={save.isPending}>
-              {save.isPending ? 'Saving...' : 'Save'}
+              {save.isPending ? 'Saving...' : 'Save Changes'}
             </button>
           </div>
         </form>

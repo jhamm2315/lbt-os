@@ -64,15 +64,35 @@ def update_lead(
     body: LeadUpdate,
     auth: Annotated[AuthContext, Depends(get_auth)],
 ):
+    from datetime import datetime, timezone
     db = get_db()
     update_data = body.model_dump(exclude_none=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update.")
 
+    # Capture old status for history before updating
+    old_status = None
+    new_status = update_data.get("status")
+    if new_status:
+        existing = (
+            db.table("leads")
+            .select("status")
+            .eq("id", lead_id)
+            .eq("org_id", auth.org_id)
+            .maybe_single()
+            .execute()
+        )
+        if existing.data:
+            old_status = existing.data.get("status")
+
     # Serialize datetimes to ISO strings for Supabase
     for k, v in update_data.items():
         if hasattr(v, "isoformat"):
             update_data[k] = v.isoformat()
+
+    now = datetime.now(timezone.utc).isoformat()
+    if new_status and new_status != old_status:
+        update_data["stage_changed_at"] = now
 
     result = (
         db.table("leads")
@@ -83,6 +103,20 @@ def update_lead(
     )
     if not result.data:
         raise HTTPException(status_code=404, detail="Lead not found.")
+
+    if new_status and new_status != old_status:
+        try:
+            db.table("lead_stage_history").insert({
+                "org_id":      auth.org_id,
+                "lead_id":     lead_id,
+                "from_status": old_status,
+                "to_status":   new_status,
+                "changed_by":  auth.user_id,
+                "changed_at":  now,
+            }).execute()
+        except Exception:
+            pass  # history is best-effort — don't fail the update
+
     return result.data[0]
 
 

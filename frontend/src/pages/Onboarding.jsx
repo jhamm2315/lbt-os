@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useUser, useAuth } from '@clerk/clerk-react'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { orgApi, setAuthToken } from '../lib/api'
+import { trackVisitorEvent } from '../lib/analytics'
 
 const INDUSTRY_OPTIONS = [
   { key: 'hvac',        label: 'HVAC',         icon: '❄️' },
@@ -23,9 +24,37 @@ export default function Onboarding() {
   const [industry, setIndustry] = useState('')
   const [orgName, setOrgName]   = useState('')
   const [city, setCity]         = useState('Denver')
+  const [replaceExistingDemo, setReplaceExistingDemo] = useState(false)
   const navigate      = useNavigate()
   const { user }      = useUser()
   const { getToken }  = useAuth()
+
+  useEffect(() => {
+    setReplaceExistingDemo(false)
+  }, [industry])
+
+  useEffect(() => {
+    trackVisitorEvent('page_view', {
+      page: 'onboarding',
+      signed_in: Boolean(user?.id),
+    })
+  }, [user?.id])
+
+  const submittedInfo = (mode) => ({
+    page: 'onboarding',
+    mode,
+    clerk_user_id: user?.id || null,
+    business_name: orgName || user?.fullName || 'My Business',
+    industry: industry === 'other' ? null : industry,
+    city,
+    state: 'CO',
+  })
+
+  const { data: template } = useQuery({
+    queryKey: ['industry-template', industry],
+    queryFn: () => orgApi.getTemplate(industry).then((r) => r.data),
+    enabled: Boolean(industry) && industry !== 'other',
+  })
 
   const create = useMutation({
     mutationFn: async () => {
@@ -39,7 +68,28 @@ export default function Onboarding() {
         state: 'CO',
       })
     },
-    onSuccess: () => navigate('/app'),
+    onSuccess: () => {
+      trackVisitorEvent('info_submitted', submittedInfo('create_workspace'))
+      navigate('/app')
+    },
+  })
+
+  const launchDemo = useMutation({
+    mutationFn: async () => {
+      const token = await getToken()
+      setAuthToken(token)
+      return orgApi.bootstrapDemo({
+        industry,
+        name: orgName || undefined,
+        city,
+        state: 'CO',
+        replace_existing: replaceExistingDemo,
+      })
+    },
+    onSuccess: () => {
+      trackVisitorEvent('info_submitted', submittedInfo('launch_demo'))
+      navigate('/app')
+    },
   })
 
   return (
@@ -114,6 +164,45 @@ export default function Onboarding() {
                   </button>
                 ))}
               </div>
+              {industry && industry !== 'other' && template && (
+                <div className="rounded-3xl border border-blue-100 bg-gradient-to-br from-white via-blue-50/70 to-slate-50 p-5 shadow-[0_18px_45px_-30px_rgba(37,99,235,0.35)]">
+                  <div className="flex flex-col gap-4">
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-blue-600">Template Preview</div>
+                      <h3 className="mt-2 text-lg font-semibold text-slate-950">{template.label} starter workspace</h3>
+                      <p className="mt-2 text-sm leading-6 text-slate-600">
+                        This preview shows how LBT OS will frame your first dashboard, audit, and test data.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <PreviewBlock
+                        title="Example services"
+                        items={template.services?.slice(0, 4)}
+                      />
+                      <PreviewBlock
+                        title="Lead sources"
+                        items={template.lead_sources?.slice(0, 4)?.map(formatLabel)}
+                      />
+                      <PreviewBlock
+                        title="KPI focus"
+                        items={template.key_metrics?.slice(0, 4)?.map(formatLabel)}
+                      />
+                    </div>
+
+                    <div className="rounded-2xl border border-white/80 bg-white/80 px-4 py-4">
+                      <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">Quick wins your audit will look for</div>
+                      <div className="mt-3 space-y-2">
+                        {(template.quick_wins || []).slice(0, 2).map((item) => (
+                          <div key={item} className="text-sm leading-6 text-slate-600">
+                            {item}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
               <button
                 disabled={!industry}
                 onClick={() => setStep(1)}
@@ -168,15 +257,56 @@ export default function Onboarding() {
                   </>
                 ) : 'Launch My Dashboard →'}
               </button>
+              {industry && industry !== 'other' && (
+                <button
+                  onClick={() => launchDemo.mutate()}
+                  disabled={launchDemo.isPending}
+                  className="w-full py-3 rounded-xl border border-slate-200 bg-white text-slate-800 font-semibold text-sm hover:border-blue-300 hover:text-blue-700 transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
+                >
+                  {launchDemo.isPending ? 'Building demo workspace...' : replaceExistingDemo ? `Replace current data with ${template?.label || 'industry'} demo` : `Launch ${template?.label || 'industry'} demo with sample data`}
+                </button>
+              )}
               {create.isError && (
                 <div className="rounded-xl bg-red-50 border border-red-200 p-4 text-sm text-red-700">
                   {create.error?.response?.data?.detail || 'Could not connect to backend. Is it running on port 8002?'}
+                </div>
+              )}
+              {launchDemo.isError && (
+                <div className="rounded-xl bg-red-50 border border-red-200 p-4 text-sm text-red-700">
+                  <div>{launchDemo.error?.response?.data?.detail || 'Could not launch the demo workspace.'}</div>
+                  {launchDemo.error?.response?.status === 409 && !replaceExistingDemo && (
+                    <button
+                      onClick={() => setReplaceExistingDemo(true)}
+                      className="mt-3 inline-flex rounded-full border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-red-700 transition-colors hover:border-red-300 hover:bg-red-100"
+                    >
+                      Enable demo replacement
+                    </button>
+                  )}
                 </div>
               )}
             </div>
           )}
 
         </div>
+      </div>
+    </div>
+  )
+}
+
+function formatLabel(value) {
+  return value.replaceAll('_', ' ')
+}
+
+function PreviewBlock({ title, items = [] }) {
+  return (
+    <div className="rounded-2xl border border-white/80 bg-white/80 p-4">
+      <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">{title}</div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {items.map((item) => (
+          <span key={item} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
+            {item}
+          </span>
+        ))}
       </div>
     </div>
   )

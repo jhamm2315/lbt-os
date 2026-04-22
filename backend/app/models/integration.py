@@ -1,21 +1,28 @@
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 
-SUPPORTED_PROVIDERS = {"quickbooks", "hubspot"}
+SUPPORTED_PROVIDERS = {"quickbooks", "hubspot", "stripe"}
 SYNC_STATUSES = {"connected", "disconnected", "error"}
 RUN_STATUSES = {"pending", "running", "success", "partial", "failed"}
 
 
 class IntegrationConnectionCreate(BaseModel):
-    provider: Literal["quickbooks", "hubspot"]
+    provider: str
     label: Optional[str] = None
     credentials: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
     external_account_id: Optional[str] = None
     external_account_name: Optional[str] = None
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider(cls, value: str) -> str:
+        if value not in SUPPORTED_PROVIDERS:
+            raise ValueError(f"provider must be one of {sorted(SUPPORTED_PROVIDERS)}")
+        return value
 
 
 class IntegrationConnectionUpdate(BaseModel):

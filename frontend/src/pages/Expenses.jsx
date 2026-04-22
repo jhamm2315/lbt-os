@@ -21,7 +21,7 @@ const CAT_COLORS = {
   equipment:  'bg-indigo-50 text-indigo-700',
   insurance:  'bg-teal-50 text-teal-700',
   software:   'bg-cyan-50 text-cyan-700',
-  misc:       'bg-gray-50 text-gray-600',
+  misc:       'bg-slate-100 text-slate-500',
 }
 
 export default function Expenses() {
@@ -44,40 +44,51 @@ export default function Expenses() {
   const openEdit = (row) => { setEditing(row); setForm({ ...row, amount: row.amount || '' }); setOpen(true) }
   const closeModal = () => { setOpen(false); setEditing(null) }
 
-  // Category breakdown
   const byCategory = expenses.reduce((acc, e) => {
     acc[e.category] = (acc[e.category] || 0) + e.amount
     return acc
   }, {})
-  const total = expenses.reduce((s, e) => s + e.amount, 0)
+  const total      = expenses.reduce((s, e) => s + e.amount, 0)
+  const topCats    = Object.entries(byCategory).sort(([, a], [, b]) => b - a).slice(0, 3)
 
   const columns = [
     { key: 'description', label: 'Description', render: (v) => <span className="font-medium">{v}</span> },
-    { key: 'category',    label: 'Category',    render: (v) => <span className={`badge ${CAT_COLORS[v] || 'bg-gray-50 text-gray-600'}`}>{v}</span> },
+    { key: 'category',    label: 'Category',    render: (v) => <span className={`badge ${CAT_COLORS[v] || 'bg-slate-100 text-slate-500'}`}>{v}</span> },
     { key: 'amount',      label: 'Amount',      render: (v) => `$${Number(v).toLocaleString()}` },
     { key: 'vendor',      label: 'Vendor' },
-    { key: 'is_recurring',label: 'Recurring',   render: (v) => v ? '✓' : '' },
+    { key: 'is_recurring',label: 'Recurring',   render: (v) => v ? <span className="badge bg-indigo-50 text-indigo-700">recurring</span> : '' },
     { key: 'expense_date',label: 'Date',        render: (v) => format(new Date(v), 'MMM d, yyyy') },
   ]
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Expenses</h1>
-        <button className="btn-primary" onClick={openNew}>+ Add Expense</button>
-      </div>
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="card p-4 col-span-2 lg:col-span-1">
-          <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Total Expenses</div>
-          <div className="text-xl font-bold text-red-600">${total.toLocaleString()}</div>
+    <div className="page-shell">
+      <section className="page-command">
+        <div>
+          <div className="section-kicker">Cost Control</div>
+          <h1 className="page-title">Expenses</h1>
+          <p className="page-copy">Track spend and recurring obligations while keeping margin pressure visible.</p>
         </div>
-        {Object.entries(byCategory).sort(([,a],[,b]) => b - a).slice(0, 3).map(([cat, amt]) => (
-          <div key={cat} className="card p-4">
-            <div className="text-xs font-semibold text-gray-500 uppercase mb-1 capitalize">{cat}</div>
-            <div className="text-xl font-bold">${Number(amt).toLocaleString()}</div>
+        <button className="btn-primary" onClick={openNew}>+ Add Expense</button>
+      </section>
+
+      <section className="metric-strip md:grid-cols-4">
+        <div className="metric-chip">
+          <div className="metric-label">Total Expenses</div>
+          <div className="metric-value text-rose-600">${total.toLocaleString()}</div>
+          <p className="mt-2 text-xs text-slate-400">{expenses.length} entries</p>
+        </div>
+        {topCats.map(([cat, amt]) => (
+          <div key={cat} className="metric-chip">
+            <div className="metric-label capitalize">{cat}</div>
+            <div className="metric-value">${Number(amt).toLocaleString()}</div>
+            <p className="mt-2 text-xs text-slate-400">top category</p>
           </div>
         ))}
+      </section>
+
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-semibold tracking-tight text-slate-950">Expense log</h2>
+        <span className="text-sm text-slate-400">{expenses.length} total</span>
       </div>
 
       <DataTable columns={columns} data={expenses} onRowClick={openEdit} emptyMessage="No expenses recorded yet." />
@@ -109,7 +120,7 @@ export default function Expenses() {
             </div>
             <div className="col-span-2 flex items-center gap-3">
               <input type="checkbox" id="recurring" checked={form.is_recurring} onChange={(e) => setForm({ ...form, is_recurring: e.target.checked })} className="rounded" />
-              <label htmlFor="recurring" className="text-sm text-gray-700">Recurring expense</label>
+              <label htmlFor="recurring" className="text-sm text-slate-700">Recurring expense</label>
               {form.is_recurring && (
                 <select className="input w-auto" value={form.recurrence_period} onChange={(e) => setForm({ ...form, recurrence_period: e.target.value })}>
                   <option value="">Period...</option>
@@ -121,7 +132,7 @@ export default function Expenses() {
           <div className="flex gap-3 justify-end pt-2">
             <button type="button" className="btn-secondary" onClick={closeModal}>Cancel</button>
             <button type="submit" className="btn-primary" disabled={save.isPending}>
-              {save.isPending ? 'Saving...' : 'Save'}
+              {save.isPending ? 'Saving...' : 'Save Changes'}
             </button>
           </div>
         </form>

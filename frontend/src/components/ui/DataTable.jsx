@@ -1,7 +1,7 @@
 export default function DataTable({ columns, data, onRowClick, emptyMessage = 'No data yet.' }) {
   if (!data?.length) {
     return (
-      <div className="card p-12 text-center text-sm text-slate-400">{emptyMessage}</div>
+      <div className="card p-10 text-center text-sm text-slate-400">{emptyMessage}</div>
     )
   }
 
@@ -10,11 +10,11 @@ export default function DataTable({ columns, data, onRowClick, emptyMessage = 'N
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-slate-100 bg-[linear-gradient(180deg,#f8fafc_0%,#f1f5f9_100%)]">
+            <tr className="border-b border-slate-100 bg-slate-50/70">
               {columns.map((col) => (
                 <th
                   key={col.key}
-                  className="px-4 py-3.5 text-left text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500"
+                  className="px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400"
                   style={{ width: col.width }}
                 >
                   {col.label}
@@ -22,15 +22,15 @@ export default function DataTable({ columns, data, onRowClick, emptyMessage = 'N
               ))}
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="divide-y divide-slate-100/80">
             {data.map((row, i) => (
               <tr
                 key={row.id || i}
                 onClick={() => onRowClick?.(row)}
-                className={`${onRowClick ? 'cursor-pointer hover:bg-brand-50/45' : ''} transition-colors duration-200`}
+                className={`${onRowClick ? 'cursor-pointer hover:bg-slate-50/90' : ''} transition-colors duration-150`}
               >
                 {columns.map((col) => (
-                  <td key={col.key} className="px-4 py-3.5 text-slate-700">
+                  <td key={col.key} className="px-4 py-3 text-slate-700">
                     {col.render ? col.render(row[col.key], row) : (row[col.key] ?? '—')}
                   </td>
                 ))}

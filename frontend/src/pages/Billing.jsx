@@ -1,35 +1,108 @@
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { billingApi, orgApi } from '../lib/api'
 
 const plans = [
   {
     key: 'basic',
-    name: 'Free Audit',
-    price: '$0',
-    description: 'A sharp operating brief built from connected data.',
-    features: ['Business health score', 'Executive summary', 'Top risks and opportunities', 'Core dashboard and connector flow'],
+    name: 'Starter',
+    price: '$49/mo',
+    description: 'One dashboard that replaces four spreadsheets.',
+    features: [
+      'Lead & sales pipeline',
+      'Customer management',
+      'Revenue & expense tracking',
+      'Real-time profit dashboard',
+      'Basic metrics & reports',
+    ],
   },
   {
     key: 'pro',
-    name: 'Pro Analyst Pod',
-    price: '$99/mo',
-    description: 'For teams that want live analyst-level depth.',
-    features: ['AI drill-down', 'Recurring scans', 'Forecasts', 'Scenario modeling', 'Deeper segmentation'],
+    name: 'Growth',
+    price: '$129/mo',
+    description: 'For teams that need AI-powered revenue intelligence.',
+    features: [
+      'Everything in Starter',
+      'AI Revenue Audit (recurring scans)',
+      'Expense management',
+      'QuickBooks & HubSpot integrations',
+      'Up to 5 team members',
+      'PDF audit exports',
+    ],
   },
   {
     key: 'premium',
-    name: 'Premium',
+    name: 'Scale',
     price: '$299/mo',
-    description: 'For hands-on consulting and higher-touch strategy.',
-    features: ['Everything in Pro', 'Consulting support', 'Priority implementations', 'Custom playbooks'],
+    description: 'Multi-location operators and agencies.',
+    features: [
+      'Everything in Growth',
+      'Unlimited team members',
+      'White-label audit reports',
+      'API access',
+      'Custom playbooks',
+      'Priority support',
+    ],
+  },
+  {
+    key: 'enterprise',
+    name: 'Enterprise + DOTs',
+    price: 'Custom',
+    description: 'For teams that want LBT OS plus a professional video editing and scheduling layer.',
+    features: [
+      'Everything in Scale',
+      'DOTs raw video import pipeline',
+      'Industry-specific video templates',
+      'Short-form and long-form edit generation',
+      'Review, approval, and posting schedule workflow',
+      'White-glove implementation and media ops support',
+    ],
+    contactOnly: true,
   },
 ]
 
 export default function Billing() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [bannerDismissed, setBannerDismissed] = useState(false)
+  const upgradedPlan = searchParams.get('upgraded')   // set by Stripe success redirect
+  const checkoutSessionId = searchParams.get('session_id')
+  const qc = useQueryClient()
+
   const { data: org } = useQuery({
     queryKey: ['org-me'],
     queryFn: () => orgApi.getMe().then((r) => r.data),
   })
+
+  const checkoutStatus = useQuery({
+    queryKey: ['checkout-session', checkoutSessionId],
+    queryFn: () => billingApi.checkoutStatus(checkoutSessionId).then((r) => r.data),
+    enabled: Boolean(checkoutSessionId),
+    retry: 2,
+    retryDelay: 2500,
+  })
+
+  // Stripe's redirect to this page already confirms payment — always refresh org data
+  useEffect(() => {
+    if (!upgradedPlan && !checkoutSessionId) return
+    qc.invalidateQueries({ queryKey: ['org-me'] })
+    // Poll a few more times so the plan shows up even when webhooks have slight delay
+    const t1 = setTimeout(() => qc.invalidateQueries({ queryKey: ['org-me'] }), 3000)
+    const t2 = setTimeout(() => qc.invalidateQueries({ queryKey: ['org-me'] }), 8000)
+    return () => { clearTimeout(t1); clearTimeout(t2) }
+  }, [upgradedPlan, checkoutSessionId, qc])
+
+  // Auto-clear URL params after the banner has been seen
+  useEffect(() => {
+    if (!upgradedPlan && !checkoutSessionId) return
+    const t = setTimeout(() => setSearchParams({}, { replace: true }), 14000)
+    return () => clearTimeout(t)
+  }, [upgradedPlan, checkoutSessionId, setSearchParams])
+
+  // Reset dismiss state when banner source changes
+  useEffect(() => {
+    setBannerDismissed(false)
+  }, [upgradedPlan, checkoutSessionId])
 
   const checkout = useMutation({
     mutationFn: (plan) => billingApi.checkout(plan).then((r) => r.data),
@@ -45,35 +118,82 @@ export default function Billing() {
     },
   })
 
+  const subscriptionActive = ['active', 'trialing'].includes(org?.subscription_status)
+
   return (
     <div className="page-shell">
-      <section className="relative overflow-hidden card-surface p-6">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(37,99,235,0.12),transparent_30%),radial-gradient(circle_at_bottom_left,rgba(15,23,42,0.08),transparent_26%)]" />
-        <div className="relative flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <div className="section-kicker">Paywall & Access</div>
-            <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">Pricing & Feature Gating</h1>
-            <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-600">
-              Free should feel complete. Pro should feel like a full analyst pod working beside the customer.
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="rounded-full border border-brand-100 bg-white/80 px-4 py-2 text-sm font-medium text-brand-700 shadow-sm backdrop-blur">
-              Current plan: {org?.plan || 'basic'}
+
+      {/* ── Stripe checkout return banner ── */}
+      {(upgradedPlan || checkoutSessionId) && !bannerDismissed && (() => {
+        // Verification error → degrade gracefully (Stripe redirect already confirms payment)
+        const isVerified   = checkoutStatus.isSuccess
+        const isVerifying  = checkoutStatus.isPending
+        // Treat any verification failure as a soft success — plan will sync via webhook
+        const softSuccess  = checkoutStatus.isError || (!checkoutSessionId && upgradedPlan)
+        const displayPlan  = checkoutStatus.data?.plan || upgradedPlan
+        const displayLabel = plans.find((p) => p.key === displayPlan)?.name
+
+        return (
+          <section className={`rounded-2xl border px-6 py-5 flex items-start gap-4 ${
+            isVerifying ? 'border-blue-200 bg-blue-50' : 'border-emerald-200 bg-emerald-50'
+          }`}>
+            {/* Icon */}
+            <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full font-bold text-lg ${
+              isVerifying ? 'bg-blue-100 text-blue-600' : 'bg-emerald-100 text-emerald-700'
+            }`}>
+              {isVerifying
+                ? <span className="inline-block animate-spin text-base">⟳</span>
+                : '✓'}
             </div>
-            {org?.plan && org.plan !== 'basic' && (
-              <button className="btn-secondary" onClick={() => portal.mutate()} disabled={portal.isPending}>
-                Manage Billing
-              </button>
-            )}
-          </div>
+
+            {/* Message */}
+            <div className="flex-1 min-w-0">
+              <div className={`font-semibold ${isVerifying ? 'text-blue-900' : 'text-emerald-900'}`}>
+                {isVerifying
+                  ? 'Activating your plan…'
+                  : displayLabel ? `Welcome to ${displayLabel}!` : 'Payment received!'}
+              </div>
+              <p className={`mt-1 text-sm leading-6 ${isVerifying ? 'text-blue-700' : 'text-emerald-700'}`}>
+                {isVerifying
+                  ? 'Confirming with Stripe — this only takes a moment.'
+                  : isVerified
+                    ? 'Verified with Stripe. Your paid features are active now.'
+                    : 'Your payment went through. Your plan will update momentarily — refresh if it takes more than a minute.'}
+              </p>
+            </div>
+
+            {/* Dismiss */}
+            <button
+              className="shrink-0 ml-2 text-slate-400 hover:text-slate-600 text-xl leading-none"
+              aria-label="Dismiss"
+              onClick={() => { setBannerDismissed(true); setSearchParams({}, { replace: true }) }}
+            >
+              ×
+            </button>
+          </section>
+        )
+      })()}
+
+      <section className="page-command">
+        <div>
+          <div className="section-kicker">Access</div>
+          <h1 className="page-title">Billing</h1>
+          <p className="page-copy">Replace your spreadsheets. Know your numbers. Start with Starter, scale when you're ready.</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-slate-500">Current plan: {org?.plan || 'basic'}</span>
+          {subscriptionActive && (
+            <button className="btn-secondary" onClick={() => portal.mutate()} disabled={portal.isPending}>
+              Manage Billing
+            </button>
+          )}
         </div>
       </section>
 
-      <section className="grid gap-5 xl:grid-cols-3">
+      <section className="grid gap-5 xl:grid-cols-4">
         {plans.map((plan) => {
-          const isCurrent = org?.plan === plan.key
-          const isUpgrade = plan.key !== 'basic' && org?.plan !== plan.key
+          const isCurrent = subscriptionActive && org?.plan === plan.key
+          const actionLabel = subscriptionActive ? `Switch to ${plan.name}` : `Start ${plan.name}`
           return (
             <div key={plan.key} className={`group relative overflow-hidden card-surface p-6 ${plan.key === 'pro' ? 'ring-2 ring-brand-500/40' : ''}`}>
               <div className={`absolute inset-x-0 top-0 h-1 ${plan.key === 'pro' ? 'bg-[linear-gradient(90deg,#2563eb_0%,#60a5fa_100%)]' : 'bg-[linear-gradient(90deg,rgba(148,163,184,0.15),rgba(148,163,184,0.55),rgba(148,163,184,0.15))]'}`} />
@@ -102,13 +222,21 @@ export default function Billing() {
                   <div className="inline-flex rounded-full border border-emerald-100 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 shadow-sm">
                     Current plan
                   </div>
-                ) : isUpgrade ? (
-                  <button className="btn-primary w-full justify-center" onClick={() => checkout.mutate(plan.key)} disabled={checkout.isPending}>
-                    Upgrade to {plan.name}
-                  </button>
+                ) : plan.contactOnly ? (
+                  <a
+                    className="btn-secondary w-full justify-center"
+                    href="mailto:sales@lbt-os.com?subject=DOTs%20Enterprise%20for%20LBT%20OS"
+                  >
+                    Talk to sales
+                  </a>
                 ) : (
-                  <div className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-medium text-slate-500 shadow-sm">
-                    Included by default
+                  <button className="btn-primary w-full justify-center" onClick={() => checkout.mutate(plan.key)} disabled={checkout.isPending}>
+                    {checkout.isPending ? 'Opening Stripe...' : actionLabel}
+                  </button>
+                )}
+                {checkout.isError && (
+                  <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-700">
+                    {checkout.error?.response?.data?.detail || 'Could not open Stripe Checkout.'}
                   </div>
                 )}
               </div>

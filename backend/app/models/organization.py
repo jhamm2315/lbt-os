@@ -29,3 +29,17 @@ class OrgOut(BaseModel):
     state: str
     onboarding_complete: bool
     created_at: datetime
+
+
+class DemoBootstrapRequest(BaseModel):
+    industry: str
+    name: Optional[str] = None
+    city: str = "Denver"
+    state: str = "CO"
+    seed: int = 42
+    replace_existing: bool = False
+
+
+class DemoReseedRequest(BaseModel):
+    industry: Optional[str] = None
+    seed: int = 42

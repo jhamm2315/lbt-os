@@ -5,7 +5,7 @@ import hmac
 import hashlib
 import json
 from urllib.parse import urlencode
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -15,35 +15,6 @@ from fastapi import HTTPException
 from supabase import Client
 
 from ..config import settings
-
-
-SUPPORTED_PROVIDERS: dict[str, dict[str, Any]] = {
-    "quickbooks": {
-        "key": "quickbooks",
-        "label": "QuickBooks Online",
-        "category": "accounting",
-        "description": "Sync customers, invoices, and expenses from QuickBooks Online into LBT OS.",
-        "required_credentials": ["access_token", "realm_id"],
-        "oauth_supported": True,
-        "schema_mapping": [
-            {"raw_object": "Customer", "mapped_table": "customers", "key_fields": ["DisplayName", "PrimaryEmailAddr.Address", "PrimaryPhone.FreeFormNumber"]},
-            {"raw_object": "Invoice", "mapped_table": "sales", "key_fields": ["TotalAmt", "TxnDate", "CustomerRef.value"]},
-            {"raw_object": "Purchase", "mapped_table": "expenses", "key_fields": ["TotalAmt", "TxnDate", "AccountRef.name"]},
-        ],
-    },
-    "hubspot": {
-        "key": "hubspot",
-        "label": "HubSpot CRM",
-        "category": "crm",
-        "description": "Sync contacts and deals from HubSpot so audits can read pipeline activity automatically.",
-        "required_credentials": ["access_token"],
-        "oauth_supported": True,
-        "schema_mapping": [
-            {"raw_object": "contacts", "mapped_table": "leads", "key_fields": ["firstname", "lastname", "email", "phone"]},
-            {"raw_object": "deals", "mapped_table": "leads/sales", "key_fields": ["dealname", "amount", "dealstage", "closedate"]},
-        ],
-    },
-}
 
 EXPENSE_CATEGORY_KEYWORDS = {
     "payroll": "payroll",
@@ -69,6 +40,8 @@ def _utc_now() -> str:
 
 def _fernet() -> Fernet:
     secret = settings.integration_secret_key or settings.api_secret
+    if not secret:
+        raise HTTPException(status_code=500, detail="Integration credential encryption is not configured.")
     digest = hashlib.sha256(secret.encode("utf-8")).digest()
     key = base64.urlsafe_b64encode(digest)
     return Fernet(key)
@@ -96,13 +69,22 @@ def _normalize_expense_category(value: str | None) -> str:
     return "misc"
 
 
+def _is_missing_table_error(exc: Exception) -> bool:
+    return "Could not find the table" in str(exc)
+
+
+def _safe_optional_query(execute_fn, default):
+    try:
+        result = execute_fn()
+        return result.data or default
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            return default
+        raise
+
+
 def list_provider_definitions() -> list[dict[str, Any]]:
-    definitions = []
-    for provider in SUPPORTED_PROVIDERS.values():
-        item = dict(provider)
-        item.pop("required_credentials", None)
-        definitions.append(item)
-    return definitions
+    return [provider.definition() for provider in PROVIDER_REGISTRY.values()]
 
 
 def _sign_value(raw: str) -> str:
@@ -137,65 +119,56 @@ def get_frontend_connection_callback(provider: str, status: str, message: str | 
 
 
 def get_oauth_authorization_url(provider: str, org_id: str) -> str:
-    state = build_oauth_state(org_id, provider)
-    if provider == "quickbooks":
-        if not settings.quickbooks_client_id or not settings.quickbooks_redirect_uri:
-            raise HTTPException(status_code=500, detail="QuickBooks OAuth is not configured.")
-        params = {
-            "client_id": settings.quickbooks_client_id,
-            "response_type": "code",
-            "scope": "com.intuit.quickbooks.accounting",
-            "redirect_uri": settings.quickbooks_redirect_uri,
-            "state": state,
-        }
-        return f"https://appcenter.intuit.com/connect/oauth2?{urlencode(params)}"
-
-    if provider == "hubspot":
-        if not settings.hubspot_client_id or not settings.hubspot_redirect_uri:
-            raise HTTPException(status_code=500, detail="HubSpot OAuth is not configured.")
-        params = {
-            "client_id": settings.hubspot_client_id,
-            "redirect_uri": settings.hubspot_redirect_uri,
-            "scope": "oauth crm.objects.contacts.read crm.objects.deals.read",
-            "state": state,
-        }
-        return f"https://app.hubspot.com/oauth/authorize?{urlencode(params)}"
-
-    raise HTTPException(status_code=400, detail=f"Unsupported provider '{provider}'.")
+    provider_impl = PROVIDER_REGISTRY.get(provider)
+    if provider_impl is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider '{provider}'.")
+    return provider_impl.build_oauth_authorization_url(org_id)
 
 
 def list_connections(db: Client, org_id: str) -> list[dict[str, Any]]:
-    result = (
+    return _safe_optional_query(
+        lambda: (
         db.table("integration_connections")
         .select("id, org_id, provider, label, status, config, external_account_id, external_account_name, last_synced_at, last_sync_status, last_sync_error, created_at, updated_at")
         .eq("org_id", org_id)
         .order("created_at", desc=True)
         .execute()
+        ),
+        [],
     )
-    return result.data or []
 
 
 def list_sync_runs(db: Client, org_id: str, limit: int = 20) -> list[dict[str, Any]]:
-    result = (
+    return _safe_optional_query(
+        lambda: (
         db.table("integration_sync_runs")
         .select("*")
         .eq("org_id", org_id)
         .order("started_at", desc=True)
         .limit(limit)
         .execute()
+        ),
+        [],
     )
-    return result.data or []
 
 
 def get_connection(db: Client, org_id: str, connection_id: str) -> dict[str, Any]:
-    result = (
-        db.table("integration_connections")
-        .select("*")
-        .eq("org_id", org_id)
-        .eq("id", connection_id)
-        .maybe_single()
-        .execute()
-    )
+    try:
+        result = (
+            db.table("integration_connections")
+            .select("*")
+            .eq("org_id", org_id)
+            .eq("id", connection_id)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            raise HTTPException(
+                status_code=503,
+                detail="Integration tables are not installed in Supabase yet. Apply the integrations migration first.",
+            ) from exc
+        raise
     if result is None or not result.data:
         raise HTTPException(status_code=404, detail="Integration connection not found.")
     return result.data
@@ -211,25 +184,30 @@ def create_connection(
     external_account_id: str | None = None,
     external_account_name: str | None = None,
 ) -> dict[str, Any]:
-    if provider not in SUPPORTED_PROVIDERS:
+    provider_impl = PROVIDER_REGISTRY.get(provider)
+    if provider_impl is None:
         raise HTTPException(status_code=400, detail=f"Unsupported provider '{provider}'.")
-
-    required = SUPPORTED_PROVIDERS[provider]["required_credentials"]
-    missing = [key for key in required if not credentials.get(key)]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Missing required credentials: {', '.join(missing)}")
+    credentials = provider_impl.validate_credentials(credentials)
 
     payload = {
         "org_id": org_id,
         "provider": provider,
-        "label": label or SUPPORTED_PROVIDERS[provider]["label"],
+        "label": label or provider_impl.label,
         "status": "connected",
         "credentials_encrypted": _encrypt_credentials(credentials),
         "config": config or {},
         "external_account_id": external_account_id,
         "external_account_name": external_account_name,
     }
-    result = db.table("integration_connections").insert(payload).execute()
+    try:
+        result = db.table("integration_connections").insert(payload).execute()
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            raise HTTPException(
+                status_code=503,
+                detail="Connectors are not enabled in Supabase yet. Apply supabase/migration_add_integrations.sql first.",
+            ) from exc
+        raise
     connection_id = result.data[0]["id"]
     return sanitize_connection(get_connection(db, org_id, connection_id))
 
@@ -247,6 +225,7 @@ def update_connection(
     external_account_name: str | None = None,
 ) -> dict[str, Any]:
     existing = get_connection(db, org_id, connection_id)
+    provider_impl = PROVIDER_REGISTRY.get(existing["provider"])
     update_data: dict[str, Any] = {}
     if label is not None:
         update_data["label"] = label
@@ -261,6 +240,8 @@ def update_connection(
     if credentials is not None:
         merged = _decrypt_credentials(existing.get("credentials_encrypted"))
         merged.update(credentials)
+        if provider_impl is not None:
+            merged = provider_impl.validate_credentials(merged)
         update_data["credentials_encrypted"] = _encrypt_credentials(merged)
     if not update_data:
         return sanitize_connection(existing)
@@ -283,17 +264,22 @@ def sanitize_connection(connection: dict[str, Any]) -> dict[str, Any]:
 
 
 def _find_connection_by_provider(db: Client, org_id: str, provider: str) -> dict[str, Any] | None:
-    result = (
-        db.table("integration_connections")
-        .select("*")
-        .eq("org_id", org_id)
-        .eq("provider", provider)
-        .maybe_single()
-        .execute()
-    )
-    if result is None:
-        return None
-    return result.data
+    try:
+        result = (
+            db.table("integration_connections")
+            .select("*")
+            .eq("org_id", org_id)
+            .eq("provider", provider)
+            .maybe_single()
+            .execute()
+        )
+        if result is None:
+            return None
+        return result.data
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            return None
+        raise
 
 
 def upsert_oauth_connection(
@@ -307,6 +293,7 @@ def upsert_oauth_connection(
     external_account_name: str | None = None,
 ) -> dict[str, Any]:
     existing = _find_connection_by_provider(db, org_id, provider)
+    provider_impl = PROVIDER_REGISTRY.get(provider)
     if existing:
         return update_connection(
             db,
@@ -324,7 +311,7 @@ def upsert_oauth_connection(
         provider=provider,
         credentials=credentials,
         config=config or {},
-        label=SUPPORTED_PROVIDERS[provider]["label"],
+        label=provider_impl.label if provider_impl else provider,
         external_account_id=external_account_id,
         external_account_name=external_account_name,
     )
@@ -335,135 +322,30 @@ def exchange_oauth_code(db: Client, provider: str, code: str, state: str, extra_
     org_id = payload["org_id"]
     if payload["provider"] != provider:
         raise HTTPException(status_code=400, detail="OAuth provider mismatch.")
-
-    if provider == "quickbooks":
-        token_response = httpx.post(
-            "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
-            auth=(settings.quickbooks_client_id or "", settings.quickbooks_client_secret or ""),
-            headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": settings.quickbooks_redirect_uri or "",
-            },
-            timeout=20,
-        )
-        token_response.raise_for_status()
-        token_payload = token_response.json()
-        credentials = {
-            "access_token": token_payload["access_token"],
-            "refresh_token": token_payload.get("refresh_token"),
-            "realm_id": extra_query.get("realmId"),
-            "token_type": token_payload.get("token_type"),
-            "expires_at": int(datetime.now(timezone.utc).timestamp()) + int(token_payload.get("expires_in", 3600)),
-            "refresh_expires_in": token_payload.get("x_refresh_token_expires_in"),
-        }
-        connection = upsert_oauth_connection(
-            db,
-            org_id=org_id,
-            provider=provider,
-            credentials=credentials,
-            external_account_id=extra_query.get("realmId"),
-            external_account_name=f"QuickBooks Company {extra_query.get('realmId')}" if extra_query.get("realmId") else None,
-        )
-        return connection
-
-    if provider == "hubspot":
-        token_response = httpx.post(
-            "https://api.hubapi.com/oauth/v3/token",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "grant_type": "authorization_code",
-                "client_id": settings.hubspot_client_id or "",
-                "client_secret": settings.hubspot_client_secret or "",
-                "redirect_uri": settings.hubspot_redirect_uri or "",
-                "code": code,
-            },
-            timeout=20,
-        )
-        token_response.raise_for_status()
-        token_payload = token_response.json()
-        credentials = {
-            "access_token": token_payload["access_token"],
-            "refresh_token": token_payload.get("refresh_token"),
-            "hub_id": token_payload.get("hub_id"),
-            "scopes": token_payload.get("scopes", []),
-            "expires_at": int(datetime.now(timezone.utc).timestamp()) + int(token_payload.get("expires_in", 1800)),
-        }
-        connection = upsert_oauth_connection(
-            db,
-            org_id=org_id,
-            provider=provider,
-            credentials=credentials,
-            external_account_id=str(token_payload.get("hub_id")) if token_payload.get("hub_id") else None,
-            external_account_name=f"HubSpot Portal {token_payload.get('hub_id')}" if token_payload.get("hub_id") else None,
-        )
-        return connection
-
-    raise HTTPException(status_code=400, detail=f"Unsupported provider '{provider}'.")
-
-
-def _refresh_provider_credentials(provider: str, credentials: dict[str, Any]) -> dict[str, Any]:
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    if credentials.get("expires_at") and int(credentials["expires_at"]) - now_ts > 120:
-        return credentials
-
-    if provider == "quickbooks" and credentials.get("refresh_token"):
-        response = httpx.post(
-            "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
-            auth=(settings.quickbooks_client_id or "", settings.quickbooks_client_secret or ""),
-            headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": credentials["refresh_token"],
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        credentials.update({
-            "access_token": payload["access_token"],
-            "refresh_token": payload.get("refresh_token", credentials["refresh_token"]),
-            "expires_at": now_ts + int(payload.get("expires_in", 3600)),
-            "refresh_expires_in": payload.get("x_refresh_token_expires_in", credentials.get("refresh_expires_in")),
-        })
-        return credentials
-
-    if provider == "hubspot" and credentials.get("refresh_token"):
-        response = httpx.post(
-            "https://api.hubapi.com/oauth/v3/token",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "grant_type": "refresh_token",
-                "client_id": settings.hubspot_client_id or "",
-                "client_secret": settings.hubspot_client_secret or "",
-                "redirect_uri": settings.hubspot_redirect_uri or "",
-                "refresh_token": credentials["refresh_token"],
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        credentials.update({
-            "access_token": payload["access_token"],
-            "refresh_token": payload.get("refresh_token", credentials["refresh_token"]),
-            "expires_at": now_ts + int(payload.get("expires_in", 1800)),
-        })
-        return credentials
-
-    return credentials
+    provider_impl = PROVIDER_REGISTRY.get(provider)
+    if provider_impl is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider '{provider}'.")
+    return provider_impl.exchange_oauth_code(db, org_id=org_id, code=code, extra_query=extra_query)
 
 
 def _record_sync_run_start(db: Client, connection: dict[str, Any], trigger_source: str) -> dict[str, Any]:
-    result = db.table("integration_sync_runs").insert({
-        "org_id": connection["org_id"],
-        "connection_id": connection["id"],
-        "provider": connection["provider"],
-        "trigger_source": trigger_source,
-        "status": "running",
-        "stats": {},
-        "started_at": _utc_now(),
-    }).execute()
+    try:
+        result = db.table("integration_sync_runs").insert({
+            "org_id": connection["org_id"],
+            "connection_id": connection["id"],
+            "provider": connection["provider"],
+            "trigger_source": trigger_source,
+            "status": "running",
+            "stats": {},
+            "started_at": _utc_now(),
+        }).execute()
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            raise HTTPException(
+                status_code=503,
+                detail="Connector sync tables are not installed in Supabase yet. Apply the integrations migration first.",
+            ) from exc
+        raise
     return result.data[0]
 
 
@@ -505,18 +387,26 @@ def _get_record_link(
     object_type: str,
     external_id: str,
 ) -> dict[str, Any] | None:
-    result = (
-        db.table("integration_record_links")
-        .select("*")
-        .eq("connection_id", connection_id)
-        .eq("object_type", object_type)
-        .eq("external_id", external_id)
-        .maybe_single()
-        .execute()
-    )
-    if result is None:
-        return None
-    return result.data
+    try:
+        result = (
+            db.table("integration_record_links")
+            .select("*")
+            .eq("connection_id", connection_id)
+            .eq("object_type", object_type)
+            .eq("external_id", external_id)
+            .maybe_single()
+            .execute()
+        )
+        if result is None:
+            return None
+        return result.data
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            raise HTTPException(
+                status_code=503,
+                detail="Connector record-link tables are not installed in Supabase yet. Apply the integrations migration first.",
+            ) from exc
+        raise
 
 
 def _upsert_record_link(
@@ -598,13 +488,148 @@ def _customer_link_from_external(
 @dataclass
 class BaseProvider:
     provider_key: str
+    label: str
+    category: str
+    description: str
+    required_credentials: tuple[str, ...] = ()
+    oauth_supported: bool = False
+    connection_mode: str = "manual"
+    schema_mapping: list[dict[str, Any]] = field(default_factory=list)
+    credential_fields: list[dict[str, Any]] = field(default_factory=list)
+
+    def definition(self) -> dict[str, Any]:
+        return {
+            "key": self.provider_key,
+            "label": self.label,
+            "category": self.category,
+            "description": self.description,
+            "oauth_supported": self.oauth_supported,
+            "connection_mode": self.connection_mode,
+            "schema_mapping": self.schema_mapping,
+            "credential_fields": self.credential_fields,
+        }
+
+    def validate_credentials(self, credentials: dict[str, Any]) -> dict[str, Any]:
+        missing = [key for key in self.required_credentials if not credentials.get(key)]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Missing required credentials: {', '.join(missing)}")
+        return credentials
+
+    def build_oauth_authorization_url(self, org_id: str) -> str:
+        raise HTTPException(status_code=400, detail=f"{self.label} does not support OAuth connect.")
+
+    def exchange_oauth_code(
+        self,
+        db: Client,
+        *,
+        org_id: str,
+        code: str,
+        extra_query: dict[str, Any],
+    ) -> dict[str, Any]:
+        raise HTTPException(status_code=400, detail=f"{self.label} does not support OAuth connect.")
+
+    def refresh_credentials(self, credentials: dict[str, Any]) -> dict[str, Any]:
+        return credentials
 
     def sync(self, db: Client, connection: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
 
 
 class QuickBooksProvider(BaseProvider):
-    provider_key = "quickbooks"
+    def __init__(self):
+        super().__init__(
+            provider_key="quickbooks",
+            label="QuickBooks Online",
+            category="accounting",
+            description="Sync customers, invoices, and expenses from QuickBooks Online into LBT OS.",
+            required_credentials=("access_token", "realm_id"),
+            oauth_supported=True,
+            connection_mode="oauth",
+            schema_mapping=[
+                {"raw_object": "Customer", "mapped_table": "customers", "key_fields": ["DisplayName", "PrimaryEmailAddr.Address", "PrimaryPhone.FreeFormNumber"]},
+                {"raw_object": "Invoice", "mapped_table": "sales", "key_fields": ["TotalAmt", "TxnDate", "CustomerRef.value"]},
+                {"raw_object": "Purchase", "mapped_table": "expenses", "key_fields": ["TotalAmt", "TxnDate", "AccountRef.name"]},
+            ],
+        )
+
+    def build_oauth_authorization_url(self, org_id: str) -> str:
+        if not settings.quickbooks_client_id or not settings.quickbooks_redirect_uri:
+            raise HTTPException(
+                status_code=503,
+                detail="QuickBooks OAuth is not configured on this server. Add QUICKBOOKS_CLIENT_ID and QUICKBOOKS_REDIRECT_URI to your environment.",
+            )
+        params = {
+            "client_id": settings.quickbooks_client_id,
+            "response_type": "code",
+            "scope": "com.intuit.quickbooks.accounting",
+            "redirect_uri": settings.quickbooks_redirect_uri,
+            "state": build_oauth_state(org_id, self.provider_key),
+        }
+        return f"https://appcenter.intuit.com/connect/oauth2?{urlencode(params)}"
+
+    def exchange_oauth_code(
+        self,
+        db: Client,
+        *,
+        org_id: str,
+        code: str,
+        extra_query: dict[str, Any],
+    ) -> dict[str, Any]:
+        token_response = httpx.post(
+            "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+            auth=(settings.quickbooks_client_id or "", settings.quickbooks_client_secret or ""),
+            headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": settings.quickbooks_redirect_uri or "",
+            },
+            timeout=20,
+        )
+        token_response.raise_for_status()
+        token_payload = token_response.json()
+        credentials = {
+            "access_token": token_payload["access_token"],
+            "refresh_token": token_payload.get("refresh_token"),
+            "realm_id": extra_query.get("realmId"),
+            "token_type": token_payload.get("token_type"),
+            "expires_at": int(datetime.now(timezone.utc).timestamp()) + int(token_payload.get("expires_in", 3600)),
+            "refresh_expires_in": token_payload.get("x_refresh_token_expires_in"),
+        }
+        return upsert_oauth_connection(
+            db,
+            org_id=org_id,
+            provider=self.provider_key,
+            credentials=credentials,
+            external_account_id=extra_query.get("realmId"),
+            external_account_name=f"QuickBooks Company {extra_query.get('realmId')}" if extra_query.get("realmId") else None,
+        )
+
+    def refresh_credentials(self, credentials: dict[str, Any]) -> dict[str, Any]:
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if credentials.get("expires_at") and int(credentials["expires_at"]) - now_ts > 120:
+            return credentials
+        if not credentials.get("refresh_token"):
+            return credentials
+        response = httpx.post(
+            "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+            auth=(settings.quickbooks_client_id or "", settings.quickbooks_client_secret or ""),
+            headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": credentials["refresh_token"],
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        credentials.update({
+            "access_token": payload["access_token"],
+            "refresh_token": payload.get("refresh_token", credentials["refresh_token"]),
+            "expires_at": now_ts + int(payload.get("expires_in", 3600)),
+            "refresh_expires_in": payload.get("x_refresh_token_expires_in", credentials.get("refresh_expires_in")),
+        })
+        return credentials
 
     def _base_url(self, credentials: dict[str, Any], endpoint: str) -> str:
         realm_id = credentials["realm_id"]
@@ -626,8 +651,20 @@ class QuickBooksProvider(BaseProvider):
         return response.json()
 
     def _fetch_entities(self, credentials: dict[str, Any], entity: str) -> list[dict[str, Any]]:
-        payload = self._query(credentials, f"select * from {entity} maxresults 1000")
-        return payload.get("QueryResponse", {}).get(entity, []) or []
+        results: list[dict[str, Any]] = []
+        page_size = 1000
+        start = 1
+        while True:
+            payload = self._query(
+                credentials,
+                f"select * from {entity} startposition {start} maxresults {page_size}",
+            )
+            batch = payload.get("QueryResponse", {}).get(entity) or []
+            results.extend(batch)
+            if len(batch) < page_size:
+                break
+            start += page_size
+        return results
 
     def sync(self, db: Client, connection: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
         customers = self._fetch_entities(credentials, "Customer")
@@ -730,7 +767,99 @@ class QuickBooksProvider(BaseProvider):
 
 
 class HubSpotProvider(BaseProvider):
-    provider_key = "hubspot"
+    def __init__(self):
+        super().__init__(
+            provider_key="hubspot",
+            label="HubSpot CRM",
+            category="crm",
+            description="Sync contacts and deals from HubSpot so audits can read pipeline activity automatically.",
+            required_credentials=("access_token",),
+            oauth_supported=True,
+            connection_mode="oauth",
+            schema_mapping=[
+                {"raw_object": "contacts", "mapped_table": "leads", "key_fields": ["firstname", "lastname", "email", "phone"]},
+                {"raw_object": "deals", "mapped_table": "leads/sales", "key_fields": ["dealname", "amount", "dealstage", "closedate"]},
+            ],
+        )
+
+    def build_oauth_authorization_url(self, org_id: str) -> str:
+        if not settings.hubspot_client_id or not settings.hubspot_redirect_uri:
+            raise HTTPException(
+                status_code=503,
+                detail="HubSpot OAuth is not configured on this server. Add HUBSPOT_CLIENT_ID and HUBSPOT_REDIRECT_URI to your environment.",
+            )
+        params = {
+            "client_id": settings.hubspot_client_id,
+            "redirect_uri": settings.hubspot_redirect_uri,
+            "scope": "oauth crm.objects.contacts.read crm.objects.deals.read",
+            "state": build_oauth_state(org_id, self.provider_key),
+        }
+        return f"https://app.hubspot.com/oauth/authorize?{urlencode(params)}"
+
+    def exchange_oauth_code(
+        self,
+        db: Client,
+        *,
+        org_id: str,
+        code: str,
+        extra_query: dict[str, Any],
+    ) -> dict[str, Any]:
+        token_response = httpx.post(
+            "https://api.hubapi.com/oauth/v3/token",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type": "authorization_code",
+                "client_id": settings.hubspot_client_id or "",
+                "client_secret": settings.hubspot_client_secret or "",
+                "redirect_uri": settings.hubspot_redirect_uri or "",
+                "code": code,
+            },
+            timeout=20,
+        )
+        token_response.raise_for_status()
+        token_payload = token_response.json()
+        credentials = {
+            "access_token": token_payload["access_token"],
+            "refresh_token": token_payload.get("refresh_token"),
+            "hub_id": token_payload.get("hub_id"),
+            "scopes": token_payload.get("scopes", []),
+            "expires_at": int(datetime.now(timezone.utc).timestamp()) + int(token_payload.get("expires_in", 1800)),
+        }
+        return upsert_oauth_connection(
+            db,
+            org_id=org_id,
+            provider=self.provider_key,
+            credentials=credentials,
+            external_account_id=str(token_payload.get("hub_id")) if token_payload.get("hub_id") else None,
+            external_account_name=f"HubSpot Portal {token_payload.get('hub_id')}" if token_payload.get("hub_id") else None,
+        )
+
+    def refresh_credentials(self, credentials: dict[str, Any]) -> dict[str, Any]:
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if credentials.get("expires_at") and int(credentials["expires_at"]) - now_ts > 120:
+            return credentials
+        if not credentials.get("refresh_token"):
+            return credentials
+        response = httpx.post(
+            "https://api.hubapi.com/oauth/v3/token",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type": "refresh_token",
+                "client_id": settings.hubspot_client_id or "",
+                "client_secret": settings.hubspot_client_secret or "",
+                "redirect_uri": settings.hubspot_redirect_uri or "",
+                "refresh_token": credentials["refresh_token"],
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        credentials.update({
+            "access_token": payload["access_token"],
+            "refresh_token": payload.get("refresh_token", credentials["refresh_token"]),
+            "expires_at": now_ts + int(payload.get("expires_in", 1800)),
+        })
+        return credentials
 
     def _get(self, credentials: dict[str, Any], path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = httpx.get(
@@ -850,10 +979,179 @@ class HubSpotProvider(BaseProvider):
         return stats
 
 
+class StripeProvider(BaseProvider):
+    def __init__(self):
+        super().__init__(
+            provider_key="stripe",
+            label="Stripe",
+            category="payments",
+            description="Sync Stripe customers, charges, and processing fees into customers, sales, and expenses.",
+            required_credentials=("api_key",),
+            oauth_supported=False,
+            connection_mode="manual",
+            credential_fields=[
+                {
+                    "key": "api_key",
+                    "label": "Secret or restricted API key",
+                    "placeholder": "rk_live_... or sk_live_...",
+                    "type": "password",
+                    "required": True,
+                    "help_text": "Use a read-only restricted key when possible.",
+                },
+                {
+                    "key": "account_name",
+                    "label": "Account label",
+                    "placeholder": "Main Stripe account",
+                    "type": "text",
+                    "required": False,
+                },
+            ],
+            schema_mapping=[
+                {"raw_object": "customers", "mapped_table": "customers", "key_fields": ["name", "email", "phone"]},
+                {"raw_object": "charges", "mapped_table": "sales", "key_fields": ["amount", "currency", "description", "created"]},
+                {"raw_object": "balance_transaction.fee", "mapped_table": "expenses", "key_fields": ["fee", "type", "description"]},
+            ],
+        )
+
+    def validate_credentials(self, credentials: dict[str, Any]) -> dict[str, Any]:
+        validated = super().validate_credentials(credentials)
+        api_key = str(validated.get("api_key") or "")
+        if not api_key.startswith(("sk_", "rk_")):
+            raise HTTPException(status_code=400, detail="Stripe credentials must use a secret or restricted API key.")
+        return validated
+
+    def _get(self, credentials: dict[str, Any], path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        response = httpx.get(
+            f"https://api.stripe.com{path}",
+            headers={"Authorization": f"Bearer {credentials['api_key']}"},
+            params=params or {},
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def _list_objects(self, credentials: dict[str, Any], path: str, *, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        request_params = dict(params or {})
+        while True:
+            payload = self._get(credentials, path, params=request_params)
+            data = payload.get("data", []) or []
+            results.extend(data)
+            if not payload.get("has_more") or not data:
+                break
+            request_params["starting_after"] = data[-1]["id"]
+        return results
+
+    def sync(self, db: Client, connection: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
+        customers = self._list_objects(credentials, "/v1/customers", params={"limit": 100})
+        charges = self._list_objects(
+            credentials,
+            "/v1/charges",
+            params={"limit": 100, "expand[]": "data.balance_transaction"},
+        )
+        stats = {"customers": 0, "sales": 0, "expenses": 0}
+
+        for customer in customers:
+            if customer.get("deleted"):
+                continue
+            name = customer.get("name") or customer.get("email") or f"Stripe Customer {customer['id']}"
+            address = customer.get("address") or {}
+            _upsert_local_row(
+                db,
+                org_id=connection["org_id"],
+                table="customers",
+                connection=connection,
+                object_type="customer",
+                external_id=str(customer["id"]),
+                payload={
+                    "name": name,
+                    "email": customer.get("email"),
+                    "phone": customer.get("phone"),
+                    "address": ", ".join(filter(None, [address.get("line1"), address.get("city"), address.get("state")])),
+                    "notes": "Imported from Stripe customer.",
+                },
+                fingerprint=str(customer.get("created")),
+            )
+            stats["customers"] += 1
+
+        for charge in charges:
+            if charge.get("status") != "succeeded":
+                continue
+            amount = float(charge.get("amount") or 0) / 100
+            if amount <= 0:
+                continue
+            balance_tx = charge.get("balance_transaction") or {}
+            created_at = datetime.fromtimestamp(charge.get("created") or int(datetime.now(timezone.utc).timestamp()), timezone.utc).isoformat()
+            description = charge.get("description") or charge.get("statement_descriptor") or f"Stripe charge {charge['id']}"
+            customer_id = _customer_link_from_external(db, connection["id"], "customer", charge.get("customer"))
+            payment_method_details = charge.get("payment_method_details") or {}
+            _upsert_local_row(
+                db,
+                org_id=connection["org_id"],
+                table="sales",
+                connection=connection,
+                object_type="charge_sale",
+                external_id=str(charge["id"]),
+                payload={
+                    "customer_id": customer_id,
+                    "service": description[:120],
+                    "amount": amount,
+                    "cost": 0,
+                    "payment_method": payment_method_details.get("type") or "card",
+                    "payment_status": "paid",
+                    "source": "stripe",
+                    "invoice_number": charge.get("receipt_number") or charge["id"],
+                    "notes": "Imported from Stripe charge.",
+                    "sold_at": created_at,
+                },
+                fingerprint=str(charge.get("balance_transaction", {}).get("id") or charge.get("created")),
+            )
+            stats["sales"] += 1
+
+            fee_amount = float(balance_tx.get("fee") or 0) / 100
+            if fee_amount > 0:
+                _upsert_local_row(
+                    db,
+                    org_id=connection["org_id"],
+                    table="expenses",
+                    connection=connection,
+                    object_type="charge_fee",
+                    external_id=f"{charge['id']}:fee",
+                    payload={
+                        "category": "processing_fees",
+                        "description": f"Stripe processing fee for {description[:120]}",
+                        "amount": fee_amount,
+                        "vendor": "Stripe",
+                        "is_recurring": False,
+                        "expense_date": created_at[:10],
+                    },
+                    fingerprint=str(balance_tx.get("id") or charge.get("created")),
+                )
+                stats["expenses"] += 1
+
+        return stats
+
+
 PROVIDER_REGISTRY: dict[str, BaseProvider] = {
-    "quickbooks": QuickBooksProvider("quickbooks"),
-    "hubspot": HubSpotProvider("hubspot"),
+    "quickbooks": QuickBooksProvider(),
+    "hubspot": HubSpotProvider(),
+    "stripe": StripeProvider(),
 }
+SUPPORTED_PROVIDERS: dict[str, dict[str, Any]] = {
+    key: provider.definition() for key, provider in PROVIDER_REGISTRY.items()
+}
+
+
+def delete_connection(db: Client, org_id: str, connection_id: str) -> None:
+    """
+    Disconnect and remove a connection record.
+    Imported data (leads, customers, sales, expenses) is preserved.
+    Only the connection record and its record-links are removed.
+    """
+    get_connection(db, org_id, connection_id)  # confirms ownership — raises 404 if not found
+    db.table("integration_record_links").delete().eq("connection_id", connection_id).execute()
+    db.table("integration_sync_runs").delete().eq("connection_id", connection_id).execute()
+    db.table("integration_connections").delete().eq("id", connection_id).eq("org_id", org_id).execute()
 
 
 def run_connection_sync(
@@ -868,7 +1166,7 @@ def run_connection_sync(
     if provider is None:
         raise HTTPException(status_code=400, detail=f"No sync provider registered for '{connection['provider']}'.")
     credentials = _decrypt_credentials(connection.get("credentials_encrypted"))
-    credentials = _refresh_provider_credentials(connection["provider"], credentials)
+    credentials = provider.refresh_credentials(credentials)
     db.table("integration_connections").update({
         "credentials_encrypted": _encrypt_credentials(credentials),
     }).eq("id", connection["id"]).execute()
@@ -891,3 +1189,43 @@ def sync_all_connections_for_org(db: Client, org_id: str, *, trigger_source: str
             continue
         runs.append(run_connection_sync(db, org_id, connection["id"], trigger_source=trigger_source))
     return runs
+
+
+def get_integration_overview(db: Client, org_id: str, *, sync_limit: int = 20, import_limit: int = 20) -> dict[str, Any]:
+    from .manual_import import list_import_history
+
+    connections = [sanitize_connection(row) for row in list_connections(db, org_id)]
+    sync_runs = list_sync_runs(db, org_id, limit=sync_limit)
+    import_history = list_import_history(db, org_id, limit=import_limit)
+
+    runs_by_connection: dict[str, list[dict[str, Any]]] = {}
+    for run in sync_runs:
+        runs_by_connection.setdefault(run["connection_id"], []).append(run)
+
+    enriched_connections: list[dict[str, Any]] = []
+    for connection in connections:
+        provider = PROVIDER_REGISTRY.get(connection["provider"])
+        runs = runs_by_connection.get(connection["id"], [])
+        latest_run = runs[0] if runs else None
+        last_successful_run = next((run for run in runs if run.get("status") in {"success", "partial"}), None)
+        enriched_connections.append({
+            **connection,
+            "provider_label": provider.label if provider else connection["provider"],
+            "connection_mode": provider.connection_mode if provider else "manual",
+            "latest_run": latest_run,
+            "last_successful_run": last_successful_run,
+        })
+
+    return {
+        "providers": list_provider_definitions(),
+        "connections": enriched_connections,
+        "sync_runs": sync_runs,
+        "import_history": import_history,
+        "summary": {
+            "connections_total": len(connections),
+            "connections_healthy": sum(1 for c in connections if c.get("last_sync_status") in {"success", "partial"} or c.get("status") == "connected"),
+            "connections_failing": sum(1 for c in connections if c.get("last_sync_status") == "failed" or c.get("status") == "error"),
+            "recent_failures": sum(1 for run in sync_runs if run.get("status") == "failed"),
+            "last_successful_sync_at": next((run.get("finished_at") for run in sync_runs if run.get("status") in {"success", "partial"}), None),
+        },
+    }

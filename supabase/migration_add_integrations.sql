@@ -51,10 +51,12 @@ CREATE INDEX IF NOT EXISTS idx_integration_connections_org ON integration_connec
 CREATE INDEX IF NOT EXISTS idx_integration_sync_runs_org ON integration_sync_runs(org_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_integration_record_links_lookup ON integration_record_links(connection_id, object_type, external_id);
 
+DROP TRIGGER IF EXISTS trg_integration_connections_updated ON integration_connections;
 CREATE TRIGGER trg_integration_connections_updated
     BEFORE UPDATE ON integration_connections
     FOR EACH ROW EXECUTE FUNCTION fn_update_updated_at();
 
+DROP TRIGGER IF EXISTS trg_integration_record_links_updated ON integration_record_links;
 CREATE TRIGGER trg_integration_record_links_updated
     BEFORE UPDATE ON integration_record_links
     FOR EACH ROW EXECUTE FUNCTION fn_update_updated_at();

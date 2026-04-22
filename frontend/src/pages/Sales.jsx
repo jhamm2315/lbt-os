@@ -41,10 +41,10 @@ export default function Sales() {
     save.mutate({ ...form, amount: parseFloat(form.amount), cost: parseFloat(form.cost || 0) })
   }
 
-  // Summary stats
   const paid    = sales.filter((s) => s.payment_status === 'paid')
   const revenue = paid.reduce((sum, s) => sum + s.amount, 0)
   const profit  = paid.reduce((sum, s) => sum + s.profit, 0)
+  const margin  = revenue > 0 ? ((profit / revenue) * 100).toFixed(0) : 0
 
   const columns = [
     { key: 'service',        label: 'Service',  render: (v) => <span className="font-medium">{v}</span> },
@@ -56,25 +56,37 @@ export default function Sales() {
   ]
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Sales</h1>
+    <div className="page-shell">
+      <section className="page-command">
+        <div>
+          <div className="section-kicker">Revenue</div>
+          <h1 className="page-title">Sales</h1>
+          <p className="page-copy">Record transactions and keep margin visible without turning the page into a spreadsheet.</p>
+        </div>
         <button className="btn-primary" onClick={openNew}>+ Add Sale</button>
-      </div>
+      </section>
 
-      <div className="grid grid-cols-3 gap-4">
-        <div className="card p-4">
-          <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Revenue (Paid)</div>
-          <div className="text-xl font-bold">${revenue.toLocaleString()}</div>
+      <section className="metric-strip md:grid-cols-3">
+        <div className="metric-chip">
+          <div className="metric-label">Revenue Paid</div>
+          <div className="metric-value">${revenue.toLocaleString()}</div>
+          <p className="mt-2 text-xs text-slate-400">{paid.length} paid transactions</p>
         </div>
-        <div className="card p-4">
-          <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Gross Profit</div>
-          <div className="text-xl font-bold text-green-600">${profit.toLocaleString()}</div>
+        <div className="metric-chip">
+          <div className="metric-label">Gross Profit</div>
+          <div className="metric-value">${profit.toLocaleString()}</div>
+          <p className="mt-2 text-xs text-slate-400">{margin}% margin</p>
         </div>
-        <div className="card p-4">
-          <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Total Transactions</div>
-          <div className="text-xl font-bold">{sales.length}</div>
+        <div className="metric-chip">
+          <div className="metric-label">Transactions</div>
+          <div className="metric-value">{sales.length}</div>
+          <p className="mt-2 text-xs text-slate-400">all statuses</p>
         </div>
+      </section>
+
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-semibold tracking-tight text-slate-950">Transaction history</h2>
+        <span className="text-sm text-slate-400">{sales.length} total</span>
       </div>
 
       <DataTable columns={columns} data={sales} onRowClick={openEdit} emptyMessage="No sales yet. Record your first transaction." />
@@ -122,7 +134,7 @@ export default function Sales() {
           <div className="flex gap-3 justify-end pt-2">
             <button type="button" className="btn-secondary" onClick={closeModal}>Cancel</button>
             <button type="submit" className="btn-primary" disabled={save.isPending}>
-              {save.isPending ? 'Saving...' : editing ? 'Save' : 'Record Sale'}
+              {save.isPending ? 'Saving...' : editing ? 'Save Changes' : 'Record Sale'}
             </button>
           </div>
         </form>

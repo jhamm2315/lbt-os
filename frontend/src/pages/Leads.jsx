@@ -68,36 +68,30 @@ export default function Leads() {
 
   return (
     <div className="page-shell">
-      <section className="relative overflow-hidden card-surface p-6">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(37,99,235,0.10),transparent_30%),radial-gradient(circle_at_bottom_left,rgba(15,23,42,0.08),transparent_26%)]" />
-        <div className="relative flex items-start justify-between gap-4">
-          <div>
-            <div className="section-kicker">Pipeline Workspace</div>
-            <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">Leads</h1>
-            <p className="mt-3 max-w-2xl text-sm leading-7 text-slate-600">
-              Track incoming demand, see where deals stall, and move promising leads into won revenue.
-            </p>
-          </div>
-          <button className="btn-primary" onClick={openNew}>+ Add Lead</button>
+      <section className="page-command">
+        <div>
+          <div className="section-kicker">Pipeline</div>
+          <h1 className="page-title">Leads</h1>
+          <p className="page-copy">Track demand, follow-up, and conversion without leaving the operating flow.</p>
         </div>
+        <button className="btn-primary" onClick={openNew}>+ Add Lead</button>
       </section>
 
-      <section className="alive-grid md:grid-cols-3 xl:grid-cols-6">
+      <section className="metric-strip grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
         {STATUSES.map((s) => {
           const count = leads.filter((l) => l.status === s).length
           return (
-            <div key={s} className="glass-panel p-4">
-              <div className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-400">{s}</div>
-              <div className="mt-3 text-3xl font-semibold tracking-tight text-slate-950">{count}</div>
-              <div className={`mt-3 inline-flex rounded-full px-3 py-1 text-xs font-semibold ${STATUS_COLORS[s]}`}>{s} stage</div>
+            <div key={s} className="metric-chip">
+              <div className="metric-label">{s}</div>
+              <div className="metric-value">{count}</div>
             </div>
           )
         })}
       </section>
 
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold tracking-tight text-slate-950">Lead Table</h2>
-        <button className="btn-primary" onClick={openNew}>+ Add Lead</button>
+        <h2 className="text-base font-semibold tracking-tight text-slate-950">Lead records</h2>
+        <span className="text-sm text-slate-400">{leads.length} total</span>
       </div>
 
       <DataTable

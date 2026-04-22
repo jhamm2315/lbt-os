@@ -31,13 +31,39 @@ def list_sales(
 
 @router.post("", response_model=SaleOut, status_code=201)
 def create_sale(body: SaleCreate, auth: Annotated[AuthContext, Depends(get_auth)]):
+    from datetime import datetime, timezone
     db = get_db()
     data = body.model_dump(exclude_none=True)
     data["org_id"] = auth.org_id
     if "sold_at" in data and hasattr(data["sold_at"], "isoformat"):
         data["sold_at"] = data["sold_at"].isoformat()
     result = db.table("sales").insert(data).execute()
-    return result.data[0]
+    sale = result.data[0]
+
+    # Sync lifetime_value, total_orders, last_purchase_at on linked customer
+    customer_id = sale.get("customer_id")
+    if customer_id:
+        try:
+            existing = (
+                db.table("customers")
+                .select("lifetime_value, total_orders")
+                .eq("id", customer_id)
+                .eq("org_id", auth.org_id)
+                .maybe_single()
+                .execute()
+            )
+            if existing.data:
+                current_ltv = float(existing.data.get("lifetime_value") or 0)
+                current_orders = int(existing.data.get("total_orders") or 0)
+                db.table("customers").update({
+                    "lifetime_value":   round(current_ltv + float(sale.get("amount") or 0), 2),
+                    "total_orders":     current_orders + 1,
+                    "last_purchase_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", customer_id).eq("org_id", auth.org_id).execute()
+        except Exception:
+            pass  # best-effort — don't fail the sale creation
+
+    return sale
 
 
 @router.get("/{sale_id}", response_model=SaleOut)

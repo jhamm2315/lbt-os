@@ -1,7 +1,8 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useAuth, SignIn, SignUp } from '@clerk/clerk-react'
 import { setAuthToken } from './lib/api'
+import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/layout/Layout'
 import MarketingHome from './pages/MarketingHome'
 import Dashboard from './pages/Dashboard'
@@ -13,6 +14,11 @@ import AIInsights from './pages/AIInsights'
 import Onboarding from './pages/Onboarding'
 import Connections from './pages/Connections'
 import Billing from './pages/Billing'
+import Admin from './pages/Admin'
+import Strategy from './pages/Strategy'
+import Messages from './pages/Messages'
+import RevenueIntelligence from './pages/RevenueIntelligence'
+import NotFound from './pages/NotFound'
 
 function AuthSync() {
   const { getToken, isSignedIn } = useAuth()
@@ -32,7 +38,30 @@ function AuthSync() {
 }
 
 function RequireAuth({ children }) {
-  const { isLoaded, isSignedIn } = useAuth()
+  const { getToken, isLoaded, isSignedIn } = useAuth()
+  const [tokenReady, setTokenReady] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setTokenReady(false)
+
+    if (!isLoaded || !isSignedIn) return
+
+    getToken()
+      .then((token) => {
+        if (cancelled) return
+        setAuthToken(token)
+        setTokenReady(true)
+      })
+      .catch(() => {
+        if (!cancelled) setTokenReady(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [getToken, isLoaded, isSignedIn])
+
   if (!isLoaded) {
     return (
       <div className="flex h-screen items-center justify-center text-gray-400 text-sm">
@@ -41,12 +70,20 @@ function RequireAuth({ children }) {
     )
   }
   if (!isSignedIn) return <Navigate to="/sign-in" replace />
+  if (!tokenReady) {
+    return (
+      <div className="flex h-screen items-center justify-center text-gray-400 text-sm">
+        Loading...
+      </div>
+    )
+  }
   return children
 }
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <ErrorBoundary>
       <AuthSync />
       <Routes>
         <Route path="/" element={<MarketingHome />} />
@@ -58,7 +95,7 @@ export default function App() {
             <div className="flex h-screen items-center justify-center bg-gray-50">
               <SignIn
                 routing="hash"
-                afterSignInUrl="/onboarding"
+                fallbackRedirectUrl="/onboarding"
                 signUpUrl="/sign-up"
               />
             </div>
@@ -70,7 +107,7 @@ export default function App() {
             <div className="flex h-screen items-center justify-center bg-gray-50">
               <SignUp
                 routing="hash"
-                afterSignUpUrl="/onboarding"
+                fallbackRedirectUrl="/onboarding"
                 signInUrl="/sign-in"
               />
             </div>
@@ -83,6 +120,9 @@ export default function App() {
           element={<RequireAuth><Onboarding /></RequireAuth>}
         />
 
+        {/* Admin panel */}
+        <Route path="/admin" element={<Admin />} />
+
         {/* Main app */}
         <Route path="/app" element={<RequireAuth><Layout /></RequireAuth>}>
           <Route index element={<Dashboard />} />
@@ -93,8 +133,15 @@ export default function App() {
           <Route path="expenses" element={<Expenses />} />
           <Route path="insights" element={<AIInsights />} />
           <Route path="billing" element={<Billing />} />
+          <Route path="strategy" element={<Strategy />} />
+          <Route path="revenue-intelligence" element={<RevenueIntelligence />} />
+          <Route path="messages" element={<Messages />} />
         </Route>
+
+        {/* 404 catch-all */}
+        <Route path="*" element={<NotFound />} />
       </Routes>
+      </ErrorBoundary>
     </BrowserRouter>
   )
 }
